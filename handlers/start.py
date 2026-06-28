@@ -1,47 +1,37 @@
-from aiogram import Dispatcher, F
+from aiogram import Dispatcher, F, Router
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 
-from handlers.list import send_list, cmd_stats, export_purchases
-from services.db import get_total
-from keyboards.categories import get_main_keyboard
+from keyboards.main import get_main_menu_keyboard, get_start_keyboard
 
 
 async def cmd_start(message: Message, state: FSMContext) -> None:
+    """Команда /start - главное меню"""
     await state.clear()
     await message.answer(
-        '💰 SpendNote\n\nУчет покупок и статистика\n\nВыбери действие ↓',
-        reply_markup=get_main_keyboard(),
+        '💰 <b>SpendNote & Shop</b>\n\n'
+        'Учет покупок, магазин и корзина\n\n'
+        'Выбери действие ↓',
+        reply_markup=get_start_keyboard(),
+        parse_mode='HTML',
     )
 
 
-async def handle_menu_action(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    text = (message.text or '').strip()
-    if text == '➕ Добавить':
-        from handlers.add_item import cmd_add
-        await cmd_add(message, state)
-        return
-    if text == '📋 Покупки':
-        await send_list(message, None)
-        return
-    if text == '💰 Общая сумма':
-        total = get_total(message.from_user.id)
-        await message.answer(f'💰 Всего потрачено: {total} ₽')
-        return
-    if text == '📊 Статистика':
-        await cmd_stats(message)
-        return
-    if text == '📤 Экспорт':
-        await export_purchases(message)
-        return
-    if text == '🗑 Очистить':
-        await message.answer('Отправь /clear для подтверждения')
-        return
+async def cmd_help(message: Message) -> None:
+    """Команда /help"""
+    await message.answer(
+        '❓ <b>Справка</b>\n\n'
+        '🛍️ <b>Магазин</b> - Просмотр товаров и категорий\n'
+        '🛒 <b>Корзина</b> - Управление корзиной\n'
+        '📋 <b>Мои покупки</b> - История ваших покупок\n\n'
+        'Используйте кнопки для навигации.',
+        parse_mode='HTML',
+    )
 
 
 def register_start_handlers(dp: Dispatcher) -> None:
+    """Регистрация основных обработчиков"""
     dp.message.register(cmd_start, CommandStart())
-    dp.message.register(cmd_start, Command(commands=['help', 'menu']))
-    dp.message.register(handle_menu_action, F.text.in_({'➕ Добавить', '📋 Покупки', '💰 Общая сумма', '📊 Статистика', '📤 Экспорт', '🗑 Очистить'}))
+    dp.message.register(cmd_help, Command(commands=['help']))
+
