@@ -1,133 +1,229 @@
-import os
+from __future__ import annotations
+
+import csv
+import tempfile
 from collections import defaultdict
-from aiogram import Dispatcher
+from html import escape
+from pathlib import Path
+
+from aiogram import Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import FSInputFile, Message
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, FSInputFile, Message
 
-from services.db import list_purchases, get_total, get_stats, get_summary
+from keyboards.categories import CATEGORY_ICONS, format_priority, get_item_actions
+from keyboards.main import get_main_keyboard
+from services.db import (
+    STATUSES,
+    get_budget,
+    get_purchase,
+    get_stats,
+    get_totals,
+    iter_export_rows,
+    list_purchases,
+    normalize_status,
+    set_budget,
+    update_status,
+)
+from services.fsm import SettingsStates
 
-CATEGORY_ICONS = {
-    'Одежда': '👕',
-    'Техника': '📱',
-    'Еда': '🍔',
-    'Поездки': '✈️',
-    'Развлечения': '🎮',
-    'Быт': '🏠',
-    'Другое': '📌',
-}
+
+def money(value: int) -> str:
+    return f"{value:,}".replace(",", " ") + " ₽"
 
 
-def format_purchase_groups(purchases: list[dict]) -> str:
+def format_items(items: list[dict], title: str) -> str:
     grouped: dict[str, list[dict]] = defaultdict(list)
-    for item in purchases:
-        grouped[item['category']].append(item)
+    for item in items:
+        grouped[item["category"]].append(item)
 
-    lines = ['📋 Твои покупки']
-    grand_total = 0
-    for category in sorted(grouped.keys()):
-        items = grouped[category]
-        icon = CATEGORY_ICONS.get(category, '📌')
-        lines.append(f'\n{icon} {category}')
-        cat_total = 0
-        for idx, item in enumerate(items, 1):
-            lines.append(f'  {idx}. {item["name"]} — {item["price"]} ₽')
-            cat_total += item['price']
-        lines.append(f'  Σ {cat_total} ₽')
-        grand_total += cat_total
-
-    lines.append(f'\n━━━━━━━━━━━━━━')
-    lines.append(f'💰 Итого: {grand_total} ₽')
-    return '\n'.join(lines)
+    lines = [f"<b>{title}</b>"]
+    total = 0
+    for category, category_items in grouped.items():
+        lines.append(f"\n{CATEGORY_ICONS.get(category, '📌')} <b>{category}</b>")
+        for item in category_items:
+            total += int(item["price"])
+            note = f"\n   📝 {escape(item['note'])}" if item.get("note") else ""
+            lines.append(
+                f"#{item['id']} {escape(item['name'])} - {money(int(item['price']))}\n"
+                f"   {format_priority(item['priority'])}{note}"
+            )
+    lines.append(f"\n<b>Итого: {money(total)}</b>")
+    return "\n".join(lines)
 
 
-async def send_list(message: Message, category: str | None) -> None:
-    purchases = list_purchases(message.from_user.id, category)
-    if not purchases:
-        await message.answer('📋 Нет покупок 📭')
+async def send_items(message: Message, status: str | None = "planned") -> None:
+    items = list_purchases(message.from_user.id, status=status)
+    if not items:
+        label = STATUSES.get(status or "planned", "Список")
+        await message.answer(f"{label}: пока пусто.", reply_markup=get_main_keyboard())
         return
 
-    await message.answer(format_purchase_groups(purchases))
+    title = "📌 План покупок" if status == "planned" else "✅ Куплено" if status == "bought" else "📋 Покупки"
+    await message.answer(format_items(items, title), reply_markup=get_main_keyboard(), parse_mode="HTML")
+
+    for item in items[:5]:
+        await message.answer(
+            f"#{item['id']} {item['name']} - {money(int(item['price']))}",
+            reply_markup=get_item_actions(item["id"], item["status"]),
+        )
+
+
+async def menu_planned(message: Message) -> None:
+    await send_items(message, "planned")
+
+
+async def menu_bought(message: Message) -> None:
+    await send_items(message, "bought")
 
 
 async def cmd_list(message: Message) -> None:
     args = message.text.split()[1:]
-    category = ' '.join(args) if args else None
-    await send_list(message, category)
+    status = None if args and args[0].lower() in {"all", "все"} else normalize_status(args[0]) if args else "planned"
+    await send_items(message, status=status)
 
 
-async def cmd_total(message: Message) -> None:
+async def cmd_budget(message: Message, state: FSMContext) -> None:
     args = message.text.split()[1:]
-    category = ' '.join(args) if args else None
-    if category:
-        total = get_total(message.from_user.id, category)
-        await message.answer(f'💰 {category}: {total} ₽')
+    if args:
+        try:
+            amount = int(args[0].replace(" ", "").replace("\u00A0", ""))
+        except ValueError:
+            await message.answer("Бюджет нужно указать числом: /budget 60000")
+            return
+        set_budget(message.from_user.id, amount)
+        await message.answer(f"💰 Бюджет установлен: <b>{money(amount)}</b>", parse_mode="HTML")
         return
 
-    total = get_total(message.from_user.id)
-    await message.answer(f'💰 Всего потрачено: {total} ₽')
+    budget = get_budget(message.from_user.id)
+    if budget:
+        await message.answer(f"💰 Текущий бюджет: <b>{money(budget)}</b>\nЧтобы изменить: /budget 60000", parse_mode="HTML")
+        return
+
+    await state.set_state(SettingsStates.waiting_for_budget)
+    await message.answer("💰 Напиши месячный бюджет числом, например: <b>60000</b>", parse_mode="HTML")
+
+
+async def handle_budget_value(message: Message, state: FSMContext) -> None:
+    try:
+        amount = int((message.text or "").replace(" ", "").replace("\u00A0", ""))
+    except ValueError:
+        await message.answer("Не похоже на число. Например: <b>60000</b>", parse_mode="HTML")
+        return
+    set_budget(message.from_user.id, amount)
+    await state.clear()
+    await message.answer(f"Готово. Бюджет: <b>{money(amount)}</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
 
 
 async def cmd_stats(message: Message) -> None:
-    stats = get_stats(message.from_user.id)
-    summary = get_summary(message.from_user.id)
-    if not stats or summary['count'] == 0:
-        await message.answer('📊 Нет данных. Добавь первую покупку!')
-        return
+    totals = get_totals(message.from_user.id)
+    planned = totals["planned"]["total"]
+    bought = totals["bought"]["total"]
+    budget = int(totals["budget"])
 
-    lines = ['📊 Статистика расходов']
-    for item in stats:
-        icon = CATEGORY_ICONS.get(item["category"], '📌')
-        count_text = f'{item["count"]} покупок' if item["count"] > 1 else 'покупка'
-        lines.append(f'{icon} {item["category"]}: {count_text} — {item["total"]} ₽')
+    lines = ["📊 <b>Финансовая картина</b>\n"]
+    lines.append(f"📌 В плане: {totals['planned']['count']} на <b>{money(planned)}</b>")
+    lines.append(f"✅ Куплено: {totals['bought']['count']} на <b>{money(bought)}</b>")
+    if totals["skipped"]["count"]:
+        lines.append(f"🕒 Отложено: {totals['skipped']['count']} на <b>{money(totals['skipped']['total'])}</b>")
 
-    average = summary['total'] // summary['count'] if summary['count'] else 0
-    lines.append('━━━━━━━━━━━━━━')
-    lines.append(f'📦 Всего: {summary["count"]} покупок')
-    lines.append(f'💰 Сумма: {summary["total"]} ₽')
-    lines.append(f'📈 Среднее: {average} ₽/шт')
-    await message.answer('\n'.join(lines))
+    if budget:
+        remaining = budget - planned
+        marker = "🟢" if remaining >= 0 else "🔴"
+        lines.append(f"\n💰 Бюджет: <b>{money(budget)}</b>")
+        lines.append(f"{marker} После плана: <b>{money(remaining)}</b>")
+    else:
+        lines.append("\n💰 Бюджет не задан. Команда: /budget 60000")
+
+    stats = get_stats(message.from_user.id, status="planned")
+    if stats:
+        lines.append("\n<b>План по категориям:</b>")
+        for item in stats:
+            lines.append(f"{CATEGORY_ICONS.get(item['category'], '📌')} {item['category']}: {money(int(item['total']))}")
+
+    await message.answer("\n".join(lines), reply_markup=get_main_keyboard(), parse_mode="HTML")
 
 
 async def cmd_export(message: Message) -> None:
-    await export_purchases(message)
-
-
-async def export_purchases(message: Message) -> None:
-    purchases = list_purchases(message.from_user.id)
-    if not purchases:
-        await message.answer('❌ Нет покупок для экспорта')
+    rows = list(iter_export_rows(message.from_user.id))
+    if not rows:
+        await message.answer("Экспортировать пока нечего.")
         return
 
-    file_path = os.path.join(os.getcwd(), f'expenses_{message.from_user.id}.txt')
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8-sig", newline="", suffix=".csv", delete=False) as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=["id", "name", "price", "category", "status", "priority", "note", "created_at"],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+        file_path = file.name
+
     try:
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write('SpendNote — Экспорт покупок\n')
-            f.write('=' * 50 + '\n\n')
-            grouped = defaultdict(list)
-            for item in purchases:
-                grouped[item['category']].append(item)
-            
-            total_sum = 0
-            for category in sorted(grouped.keys()):
-                items = grouped[category]
-                f.write(f'{category}\n')
-                cat_sum = 0
-                for item in items:
-                    f.write(f'  • {item["name"]}: {item["price"]} ₽\n')
-                    cat_sum += item['price']
-                f.write(f'  Итого: {cat_sum} ₽\n\n')
-                total_sum += cat_sum
-            
-            f.write(f'Всего расходов: {total_sum} ₽\n')
-        
-        await message.answer_document(FSInputFile(file_path), caption='📋 Экспорт покупок')
+        await message.answer_document(FSInputFile(file_path, filename="spendnote_export.csv"), caption="📤 Экспорт SpendNote")
     finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        Path(file_path).unlink(missing_ok=True)
+
+
+async def cmd_buy(message: Message) -> None:
+    args = message.text.split()[1:]
+    if not args:
+        await message.answer("Укажи ID: /buy 12")
+        return
+    try:
+        item_id = int(args[0])
+    except ValueError:
+        await message.answer("ID должен быть числом.")
+        return
+    await _set_status(message, item_id, "bought")
+
+
+async def cmd_skip(message: Message) -> None:
+    args = message.text.split()[1:]
+    if not args:
+        await message.answer("Укажи ID: /skip 12")
+        return
+    try:
+        item_id = int(args[0])
+    except ValueError:
+        await message.answer("ID должен быть числом.")
+        return
+    await _set_status(message, item_id, "skipped")
+
+
+async def _set_status(message: Message, item_id: int, status: str) -> None:
+    item = get_purchase(message.from_user.id, item_id)
+    if not item:
+        await message.answer("Не нашел такую покупку.")
+        return
+    update_status(message.from_user.id, item_id, status)
+    label = STATUSES[status]
+    await message.answer(f"{label}: #{item_id} {escape(item['name'])}", reply_markup=get_main_keyboard(), parse_mode="HTML")
+
+
+async def handle_status_callback(callback: CallbackQuery) -> None:
+    action, raw_id = callback.data.split(":", 1)
+    item_id = int(raw_id)
+    status = "bought" if action == "buy" else "skipped"
+    updated = update_status(callback.from_user.id, item_id, status)
+    if not updated:
+        await callback.answer("Покупка не найдена", show_alert=True)
+        return
+    await callback.message.edit_text(f"{STATUSES[status]}: #{item_id}")
+    await callback.answer("Готово")
 
 
 def register_list_handlers(dp: Dispatcher) -> None:
-    dp.message.register(cmd_list, Command(commands=['list']))
-    dp.message.register(cmd_total, Command(commands=['total']))
-    dp.message.register(cmd_stats, Command(commands=['stats']))
-    dp.message.register(cmd_export, Command(commands=['export']))
+    dp.message.register(cmd_list, Command(commands=["list"]))
+    dp.message.register(menu_planned, F.text == "📌 План")
+    dp.message.register(menu_bought, F.text == "✅ Куплено")
+    dp.message.register(cmd_budget, Command(commands=["budget"]))
+    dp.message.register(cmd_budget, F.text == "💰 Бюджет")
+    dp.message.register(handle_budget_value, SettingsStates.waiting_for_budget)
+    dp.message.register(cmd_stats, Command(commands=["stats"]))
+    dp.message.register(cmd_stats, F.text == "📊 Статистика")
+    dp.message.register(cmd_export, Command(commands=["export"]))
+    dp.message.register(cmd_export, F.text == "📤 Экспорт")
+    dp.message.register(cmd_buy, Command(commands=["buy"]))
+    dp.message.register(cmd_skip, Command(commands=["skip"]))
+    dp.callback_query.register(handle_status_callback, F.data.startswith("buy:") | F.data.startswith("skip:"))

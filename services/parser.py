@@ -1,88 +1,126 @@
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+
+from services.db import CATEGORIES, DEFAULT_CATEGORY, DEFAULT_PRIORITY, DEFAULT_STATUS, normalize_category
 
 
-@dataclass
+@dataclass(frozen=True)
 class ParsedPurchase:
     name: str
-    price: Optional[int]
-    category: Optional[str]
+    price: int | None
+    category: str | None
+    status: str
+    priority: str
+    note: str
     raw_text: str
 
 
 class PurchaseParser:
-    CATEGORY_KEYWORDS = {
-        'Одежда': ['одежда', 'одежды', 'одежду', 'одежку', 'одежки', 'одежка'],
-        'Техника': ['техника', 'технику', 'технике', 'гаджет', 'гаджеты', 'телефон', 'ноутбук', 'планшет'],
-        'Еда': ['еда', 'еды', 'еду', 'булка', 'булки', 'ресторан', 'кафе', 'продукты'],
-        'Поездки': ['поездка', 'поездки', 'билет', 'билеты', 'такси', 'метро', 'самолет', 'поезд'],
-        'Развлечения': ['развлечение', 'развлечения', 'кино', 'концерт', 'парк', 'игра', 'хобби'],
-        'Быт': ['быт', 'хозяйство', 'сантехника', 'посуду', 'посуд', 'мыло', 'шампунь', 'уборка'],
-        'Другое': ['другое', 'прочее', 'разное', 'misc'],
+    PRICE_REGEX = re.compile(r"(?<!\d)(\d{1,3}(?:[\s\u00A0]\d{3})*|\d+)(?:\s*(?:р|руб|₽))?(?!\d)", re.IGNORECASE)
+    NOTE_REGEX = re.compile(r"(?:заметка|коммент|note)\s*:\s*(.+)$", re.IGNORECASE)
+
+    STATUS_KEYWORDS = {
+        "купил": "bought",
+        "купила": "bought",
+        "куплено": "bought",
+        "оплатил": "bought",
+        "оплачено": "bought",
+        "хочу": "planned",
+        "надо": "planned",
+        "купить": "planned",
+        "план": "planned",
+        "отложить": "skipped",
+        "потом": "skipped",
     }
 
-    PRICE_REGEX = re.compile(r'(\d+(?:\s\d{3})*)')
-
-    @classmethod
-    def _match_category(cls, token: str) -> Optional[str]:
-        normalized = token.lower().strip()
-        for category, keywords in cls.CATEGORY_KEYWORDS.items():
-            for keyword in keywords:
-                if normalized == keyword.lower():
-                    return category
-        return None
-
-    @classmethod
-    def _find_price(cls, text: str) -> Tuple[Optional[int], Optional[int], Optional[int]]:
-        match = None
-        for m in cls.PRICE_REGEX.finditer(text):
-            match = m
-        if not match:
-            return None, None, None
-        try:
-            amount_str = match.group(1).replace(' ', '')
-            return int(amount_str), match.start(), match.end()
-        except ValueError:
-            return None, None, None
+    PRIORITY_KEYWORDS = {
+        "важно": "high",
+        "срочно": "high",
+        "обязательно": "high",
+        "must": "high",
+        "неважно": "low",
+        "когда-нибудь": "low",
+    }
 
     @classmethod
     def parse(cls, text: str) -> ParsedPurchase:
-        cleaned = text.strip()
+        cleaned = " ".join((text or "").strip().split())
         if not cleaned:
-            return ParsedPurchase(name='', price=None, category=None, raw_text=text)
+            return ParsedPurchase("", None, None, DEFAULT_STATUS, DEFAULT_PRIORITY, "", text)
 
-        price, price_start, price_end = cls._find_price(cleaned)
-        text_without_price = cleaned
-        if price is not None and price_start is not None and price_end is not None:
-            text_without_price = (cleaned[:price_start] + ' ' + cleaned[price_end:]).strip()
+        note = ""
+        note_match = cls.NOTE_REGEX.search(cleaned)
+        if note_match:
+            note = note_match.group(1).strip()
+            cleaned = cleaned[: note_match.start()].strip()
 
-        tokens = [t for t in re.split(r'\s+', text_without_price) if t]
-        if not tokens:
-            return ParsedPurchase(name='', price=price, category=None, raw_text=text)
+        price, cleaned = cls._extract_price(cleaned)
+        words = cleaned.split()
 
+        status = DEFAULT_STATUS
+        priority = DEFAULT_PRIORITY
         category = None
-        category_idx = -1
-        for idx, token in enumerate(tokens):
-            matched_cat = cls._match_category(token)
-            if matched_cat:
-                category = matched_cat
+        content_words: list[str] = []
+
+        for word in words:
+            token = word.lower().strip(".,;:!?")
+            if token in cls.STATUS_KEYWORDS:
+                status = cls.STATUS_KEYWORDS[token]
+                continue
+            if token in cls.PRIORITY_KEYWORDS:
+                priority = cls.PRIORITY_KEYWORDS[token]
+                continue
+            content_words.append(word)
+
+        category_idx = None
+        for idx, word in enumerate(content_words):
+            matched_category = cls.detect_category(word)
+            if matched_category and len(content_words) > 1:
+                category = matched_category
                 category_idx = idx
-                break
 
-        name_tokens = [t for i, t in enumerate(tokens) if i != category_idx]
-        name = ' '.join(name_tokens).strip()
+        if category_idx is None:
+            for word in content_words:
+                matched_category = cls.detect_category(word)
+                if matched_category:
+                    category = matched_category
+                    break
 
-        return ParsedPurchase(name=name or 'Товар', price=price, category=category, raw_text=text)
+        name_words = [word for idx, word in enumerate(content_words) if idx != category_idx]
+        name = " ".join(name_words).strip(" -.,")
+        return ParsedPurchase(
+            name=name,
+            price=price,
+            category=category,
+            status=status,
+            priority=priority,
+            note=note,
+            raw_text=text,
+        )
 
     @classmethod
-    def detect_category(cls, text: str) -> Optional[str]:
-        cleaned = text.strip()
-        if not cleaned:
+    def detect_category(cls, text: str) -> str | None:
+        value = text.lower().strip(".,;:!?")
+        if not value:
             return None
-        tokens = [t for t in re.split(r'\s+', cleaned) if t]
-        for token in tokens:
-            category = cls._match_category(token)
-            if category:
-                return category
-        return None
+        for canonical, aliases in CATEGORIES.items():
+            if value == canonical.lower() or value in aliases:
+                return canonical
+        normalized = normalize_category(value)
+        return None if normalized == DEFAULT_CATEGORY and value not in CATEGORIES[DEFAULT_CATEGORY] else normalized
+
+    @classmethod
+    def _extract_price(cls, text: str) -> tuple[int | None, str]:
+        matches = list(cls.PRICE_REGEX.finditer(text))
+        if not matches:
+            return None, text
+        match = matches[-1]
+        raw_price = match.group(1).replace(" ", "").replace("\u00A0", "")
+        try:
+            price = int(raw_price)
+        except ValueError:
+            return None, text
+        without_price = f"{text[:match.start()]} {text[match.end():]}".strip()
+        return price, without_price
