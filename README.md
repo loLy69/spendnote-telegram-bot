@@ -1,21 +1,35 @@
-# SpendNote
+<h1 align="center">SpendNote</h1>
 
-Telegram-бот в формате умного блокнота покупок. Пользователь пишет покупку обычным текстом, а бот сохраняет ее в план, определяет цену, категорию, приоритет, считает бюджет и помогает отмечать купленное.
+<p align="center">Telegram-бот для планирования покупок, контроля бюджета и учёта расходов</p>
 
-## Что умеет
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/aiogram-3.x-26A5E4?style=flat-square&logo=telegram&logoColor=white" alt="aiogram">
+  <img src="https://img.shields.io/badge/SQLite-local-003B57?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite">
+  <img src="https://img.shields.io/badge/status-active-2EA44F?style=flat-square" alt="Active">
+</p>
 
-- Быстрое добавление покупок одной строкой: `хочу ноутбук 80000 техника важно`.
-- Пошаговое добавление через `/add`, если пользователь пишет только название.
-- Автоматическое определение цены, категории, статуса и приоритета.
-- Статусы покупок: `В плане`, `Куплено`, `Отложено`.
-- Месячный бюджет и расчет остатка после планируемых покупок.
-- Статистика по категориям.
-- Экспорт данных в CSV.
-- Inline-действия для покупки: отметить купленной, отложить, удалить.
-- Персональные данные разделены по Telegram `user_id`.
-- SQLite без внешней инфраструктуры, удобно для VPS и маленьких клиентов.
+## О проекте
 
-## Примеры сообщений
+SpendNote превращает обычное сообщение пользователя в структурированную запись о покупке. Бот извлекает название, стоимость, категорию, приоритет, статус и заметку, сохраняет данные в персональную SQLite-базу и рассчитывает состояние месячного бюджета.
+
+Проект демонстрирует обработку свободного текста, разделение пользовательских данных, работу с состояниями диалога и экспорт данных.
+
+## Возможности
+
+- добавление покупки одной строкой;
+- пошаговый сценарий через FSM;
+- извлечение цены и заметки из текста;
+- автоматическое определение категории, статуса и приоритета;
+- статусы «В плане», «Куплено» и «Отложено»;
+- месячный бюджет и расчёт остатка;
+- статистика по категориям;
+- CSV-экспорт;
+- inline-действия: купить, отложить или удалить;
+- изоляция данных по Telegram `user_id`;
+- SQLite без внешней инфраструктуры.
+
+## Примеры
 
 ```text
 хочу кроссовки 9000 одежда важно
@@ -24,74 +38,129 @@ Telegram-бот в формате умного блокнота покупок. 
 такси 700 транспорт
 ```
 
+## Технологии
+
+| Компонент | Технология |
+|---|---|
+| Telegram-интерфейс | aiogram 3 |
+| Обработка текста | Python, регулярные выражения |
+| Хранилище | SQLite |
+| Сценарии ввода | aiogram FSM |
+| Конфигурация | python-dotenv |
+| Проверка ядра | smoke test |
+
+## Архитектура
+
+```mermaid
+flowchart LR
+    U["Пользователь"] --> TG["Telegram Bot API"]
+    TG --> H["Handlers"]
+    H --> P["Purchase parser"]
+    H --> F["FSM"]
+    P --> DB["SQLite service"]
+    F --> DB
+    DB --> S["Budget statistics"]
+    DB --> E["CSV export"]
+```
+
+## Структура проекта
+
+```text
+main.py                 # точка входа
+handlers/               # Telegram-сценарии
+keyboards/              # reply- и inline-кнопки
+services/db.py          # схема SQLite, миграции и запросы
+services/parser.py      # разбор свободного текста
+services/fsm.py         # состояния диалогов
+scripts/smoke_test.py   # проверка базы, парсера и статусов
+```
+
 ## Команды
 
 ```text
 /start          главное меню
 /add            добавить покупку
-/list           показать план покупок
-/list bought    показать купленные покупки
-/list all       показать все записи
+/list           покупки в плане
+/list bought    купленные покупки
+/list all       все записи
 /buy ID         отметить покупку купленной
 /skip ID        отложить покупку
 /delete ID      удалить покупку
 /budget 60000   установить месячный бюджет
-/stats          статистика и бюджет
+/stats          статистика и остаток
 /export         экспорт CSV
-/clear          очистить свои покупки
+/clear          удалить свои данные
 /help           помощь
 ```
 
 ## Установка
 
-Требуется Python 3.10+.
+```bash
+git clone https://github.com/loLy69/bot.git spendnote
+cd spendnote
+python -m venv .venv
+```
+
+Windows PowerShell:
 
 ```powershell
-python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-В `.env` нужно указать токен Telegram-бота:
+Linux и macOS:
+
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+Добавьте токен:
 
 ```env
-BOT_TOKEN=123456:telegram_bot_token
+BOT_TOKEN=your_telegram_bot_token
 ```
 
 Запуск:
 
-```powershell
+```bash
 python main.py
 ```
 
-## Проверка перед запуском
+## Проверка
 
-```powershell
+```bash
 python -m compileall -q .
-python scripts\smoke_test.py
+python scripts/smoke_test.py
 ```
 
-Smoke-тест проверяет базу, парсер, добавление покупки и смену статуса.
+Smoke-тест проверяет парсер, временную базу, добавление покупки, смену статуса и расчёт итогов.
 
-## Структура
+## Развёртывание
 
-```text
-main.py                 точка входа
-handlers/               сценарии Telegram
-keyboards/              reply и inline-кнопки
-services/db.py          SQLite, миграция, запросы
-services/parser.py      разбор свободного текста
-services/fsm.py         состояния диалогов
-scripts/smoke_test.py   быстрая проверка ядра
-```
+Для постоянной работы рекомендуется Ubuntu VPS и `systemd`. Файл `.env`, база SQLite, логи и CSV-экспорты не должны добавляться в Git.
 
-## Деплой на сервер
+## Ограничения текущей версии
 
-1. Загрузить проект на GitHub.
-2. На сервере выполнить `git pull`.
-3. Создать `.env` с реальным `BOT_TOKEN`.
-4. Установить зависимости в виртуальное окружение.
-5. Запустить `python main.py` через `systemd`, `pm2`, `screen` или другой менеджер процессов.
+- категории определяются словарём и регулярными выражениями, без ML-модели;
+- используется локальная SQLite-база;
+- нет Docker-конфигурации;
+- smoke-тест не заменяет полноценный набор unit- и integration-тестов;
+- CI и централизованный мониторинг пока не настроены.
 
-Для продажи под клиента обычно меняют название, тексты приветствия, категории и набор подсказок в `services/db.py` и `handlers/start.py`.
+## Возможности развития
+
+- Docker и автоматический deploy;
+- pytest и GitHub Actions CI;
+- PostgreSQL для масштабирования;
+- регулярные расходы и финансовые цели;
+- графики и отчёты;
+- импорт банковских операций;
+- локализация интерфейса.
+
+## Контакты
+
+- Дмитрий — Telegram: [@nigGats9](https://t.me/nigGats9)
+- Виктория, менеджер проекта — [viculence@yahoo.com](mailto:viculence@yahoo.com)
